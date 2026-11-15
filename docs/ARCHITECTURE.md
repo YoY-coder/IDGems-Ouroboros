@@ -4,6 +4,34 @@
 
 ---
 
+## 0. Règle d'or : mémoire fixe, aucune accumulation
+
+> Demande explicite : le plugin ne doit **jamais** remplir la mémoire ni le disque,
+> et ne doit **jamais** produire d'audio non voulu (ni fichiers, ni son).
+
+1. **Un seul réservoir audio de taille fixe** (`AudioPool`), alloué une fois au chargement.
+   Réglage « Mémoire max » : **48 / 96 / 192 Mo** (défaut 96 Mo par instance).
+   Tout l'audio du plugin vit dedans : capture, sources, générations, croisements.
+   Le réservoir **ne grandit jamais** : quand il est plein, on recycle.
+2. **Stockage 16 bits** à l'intérieur du réservoir (le traitement reste en float) :
+   96 Mo ≈ 8 min de stéréo à 48 kHz au total, toutes sources confondues.
+3. **Capture = buffer circulaire** : il s'écrase lui-même en continu (5–120 s), il ne s'allonge jamais.
+4. **Générations = file tournante** : seules les N dernières gardent leur audio (N limité par le réservoir).
+   Quand il faut de la place, la plus ancienne génération **non likée** est effacée.
+   Dans l'arbre, elle reste visible comme « branche fanée » (recette = seed + réglages, quelques Ko), sans audio.
+5. **Fragments = références** (début/longueur dans une source), jamais des copies.
+   Les croisements A×B créent de l'audio : ils prennent une place dans le réservoir et sont recyclés pareil.
+6. **Fichiers glissés** : lus et copiés dans le réservoir (60 s max par source, tronqués au-delà) ; le fichier d'origine n'est jamais modifié.
+7. **Disque : rien n'est écrit sans action de ta part.** Seuls « Exporter » et « Batch » écrivent des WAV, dans le dossier que tu choisis.
+   Le glisser-déposer vers Ableton utilise un fichier temporaire unique, effacé ensuite ; le dossier temporaire est vidé à chaque ouverture du plugin.
+8. **Projet Ableton** : on sauvegarde les réglages, les chemins des fichiers glissés et **uniquement les fragments likés** (compressés, plafond 16 Mo).
+   La capture et les générations ne sont pas sauvegardées : le projet reste léger.
+9. **Jauge mémoire** visible dans l'Estomac (ex. « 41 / 96 Mo »).
+10. **Pas de son non voulu** : la boucle Ouroboros est **interne** (rendu hors ligne vers le réservoir), jamais réinjectée dans la sortie en direct, donc aucun larsen possible.
+    Le moteur ne joue rien tant que le séquenceur est arrêté ou qu'aucune note n'est reçue ; chaque génération est normalisée ; limiteur obligatoire en fin de chaîne ; bouton Panic.
+
+---
+
 ## 1. Vue d'ensemble
 
 ```
@@ -70,7 +98,8 @@ est « publié » au thread audio par un échange de pointeur atomique.
 - `StateSerializer` — sauvegarde/rappel (réglages + sources : intégrées ou référencées).
 
 ### Estomac (module 1)
-- `CaptureRing` — buffer circulaire stéréo, gel instantané (« Avaler ») = copie lancée en fond.
+- `AudioPool` — réservoir audio unique de taille fixe (16 bits), allocation par blocs, recyclage du plus ancien non liké.
+- `CaptureRing` — buffer circulaire stéréo (dans le réservoir), gel instantané (« Avaler ») = copie lancée en fond.
 - `AudioFileIngestor` — décodage WAV/AIFF/FLAC/MP3 (`AudioFormatManager`), resampling vers le SR de l'hôte.
 - `Source` — audio + gain, couleur, poids, actif, mode de découpe, génération d'origine.
 - `SourceBank` — 8 emplacements max.
@@ -191,8 +220,8 @@ et Visual Studio l'ouvre directement (« Ouvrir un dossier »).
 
 | Limite | Risque | Solution proposée |
 |---|---|---|
-| **Mémoire** : 8 sources × 120 s stéréo float à 48 kHz ≈ 8 × 46 Mo = **370 Mo**, + générations | RAM d'Ableton saturée, état projet énorme | Sources stockées en **float 32 en RAM mais limitées** : générations gardées plafonnées (16 par défaut), anciennes générations compressées (FLAC en mémoire) ou purgées ; fragments = références (offset/longueur), pas de copies. |
-| **Taille de sauvegarde Ableton** | Projet de plusieurs centaines de Mo si l'audio est intégré | Par défaut **référencer** des fichiers dans un dossier projet ; option « intégrer » avec compression FLAC + avertissement de taille. |
+| **Mémoire** : sans garde-fou, 8 sources × 120 s en float + générations dépasseraient 400 Mo | RAM d'Ableton saturée | **Réservoir fixe** (voir §0) : 96 Mo par défaut, jamais dépassé, recyclage automatique. Attention : chaque instance du plugin a son propre réservoir. |
+| **Taille de sauvegarde Ableton** | Projet énorme si tout l'audio est intégré | Seuls les fragments likés sont intégrés (compressés, 16 Mo max) ; fichiers glissés = simples chemins. |
 | **Analyse/pitch (YIN)** coûteuse | Gel de l'UI ou glitch audio | Analyse en fond, résultat publié par swap ; la carte se remplit progressivement. |
 | **Bandes de fréquences** : découpe spectrale = N fois plus de fragments | Dépassement des 512 | Plafond global + priorité aux fragments les plus énergétiques ; 4 bandes max. |
 | **Croisements (vocoder, morph spectral)** : FFT lourde | Trop cher en temps réel | **Rendu en fond** puis le résultat devient un nouveau fragment ; seul le granulaire simple peut tourner en direct. |
@@ -200,7 +229,7 @@ et Visual Studio l'ouvre directement (« Ouvrir un dossier »).
 | **Limiteur lookahead + OTT** | Latence | Lookahead 1–3 ms, latence déclarée via `setLatencySamples` → Ableton compense. |
 | **Boucle Ouroboros temps réel** | Rendu d'une génération = analyse + découpe de N mesures | La sortie est copiée vers un worker via FIFO ; la nouvelle génération est prête quelques centaines de ms plus tard et s'enchaîne au début de la mesure suivante (quantifiée). |
 | **Réentrance/feedback** : la génération ré-avalée peut dériver vers le bruit ou le silence | Résultat inutilisable | Normalisation de chaque génération, % d'ADN réinjecté, détecteur de « bouillie » (flatness moyenne trop haute → plus d'ADN automatiquement). |
-| **Drag & drop vers Ableton** | Le fichier doit exister avant le drag | Rendu dans un dossier temporaire dès le clic, puis drag. |
+| **Drag & drop vers Ableton** | Le fichier doit exister avant le drag | Un seul fichier temporaire, effacé après ; dossier temporaire vidé à l'ouverture. |
 | **MP3** | Le décodage MP3 de JUCE est désactivé par défaut (brevet/licence) | Activer `JUCE_USE_MP3AUDIOFORMAT` (OK aujourd'hui, brevets expirés). |
 | **UI à 60 fps avec effets (aberration, fissures)** | CPU graphique sur Windows | Effets pré-rendus dans des images en cache, redessin limité aux zones animées ; option « UI légère ». Possibilité d'OpenGL plus tard si besoin. |
 | **Licence JUCE** | Usage commercial | Licence gratuite JUCE (Personal) OK tant que le revenu est sous le seuil ; à vérifier si diffusion commerciale. VST3 SDK sous licence MIT désormais. |
