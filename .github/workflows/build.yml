@@ -1,0 +1,30 @@
+name: Build Windows VST3
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-9.0.5-${{ runner.os }}
+
+      - name: Configurer (CMake)
+        run: cmake -S . -B build -A x64
+
+      - name: Compiler (Release)
+        run: cmake --build build --config Release --target IDGemsOuroboros_VST3 --parallel
+
+      - name: Envoyer le plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: IDGems-Ouroboros-VST3-Windows
+          path: build/IDGemsOuroboros_artefacts/Release/VST3/
+          if-no-files-found: error
