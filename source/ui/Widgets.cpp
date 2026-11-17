@@ -110,8 +110,9 @@ juce::Font IDGemsLookAndFeel::getComboBoxFont (juce::ComboBox& b)
 
 void IDGemsLookAndFeel::positionComboBoxText (juce::ComboBox& box, juce::Label& label)
 {
-    label.setBounds (2, 0, box.getWidth() - 14, box.getHeight());
+    label.setBounds (2, 0, box.getWidth() - 12, box.getHeight());
     label.setFont (getComboBoxFont (box));
+    label.setMinimumHorizontalScale (0.5f);
 }
 
 juce::Font IDGemsLookAndFeel::getPopupMenuFont()

@@ -51,6 +51,12 @@ juce::AudioBuffer<float> Controller::renderOffline (const P::Values& values, con
     for (int ch = 0; ch < 2; ++ch)
         buf.addFrom (ch, 0, buf, ch, total, juce::jmin (tail, total));
     buf.setSize (2, total, true);
+
+    // Le repli de la queue peut dépasser le plafond : on ramène sous le plafond
+    const float ceiling = juce::Decibels::decibelsToGain (v[P::limCeiling]);
+    const float peak = buf.getMagnitude (0, buf.getNumSamples());
+    if (peak > ceiling)
+        buf.applyGain (ceiling / peak);
     return buf;
 }
 

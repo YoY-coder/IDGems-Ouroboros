@@ -1,14 +1,14 @@
 #include "SampleData.h"
 
 SampleData::SampleData (MemoryBudget& b, int frames, double sr, const juce::String& n)
-    : budget (b), data ((size_t) frames * 2, 0), numFrames (frames), sampleRate (sr), name (n)
+    : budget (b.shared_from_this()), data ((size_t) frames * 2, 0), numFrames (frames), sampleRate (sr), name (n)
 {
-    budget.used += getBytes();
+    budget->used += getBytes();
 }
 
 SampleData::~SampleData()
 {
-    budget.used -= getBytes();
+    budget->used -= getBytes();
 }
 
 std::shared_ptr<SampleData> SampleData::create (MemoryBudget& budget, int numFrames, double sr, const juce::String& name)
@@ -59,14 +59,14 @@ std::vector<float> SampleData::toMono (int start, int num) const
 
 //==============================================================================
 CaptureRing::CaptureRing (MemoryBudget& b, int frames, double sr)
-    : budget (b), data ((size_t) frames * 2, 0), capacity (frames), sampleRate (sr)
+    : budget (b.shared_from_this()), data ((size_t) frames * 2, 0), capacity (frames), sampleRate (sr)
 {
-    budget.used += getBytes();
+    budget->used += getBytes();
 }
 
 CaptureRing::~CaptureRing()
 {
-    budget.used -= getBytes();
+    budget->used -= getBytes();
 }
 
 void CaptureRing::write (const float* l, const float* r, int num) noexcept

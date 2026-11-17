@@ -69,7 +69,8 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     // --- Ordre de déclaration important : le budget doit survivre à tout l'audio ---
-    MemoryBudget budget;
+    std::shared_ptr<MemoryBudget> budgetOwner { std::make_shared<MemoryBudget>() };
+    MemoryBudget& budget { *budgetOwner };
     Trash trash;
 
     juce::UndoManager undoManager;

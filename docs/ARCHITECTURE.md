@@ -1,6 +1,8 @@
 # IDGems Ouroboros — Proposition d'architecture
 
-> Statut : **proposition à valider** avant la phase 1. Rien n'est codé.
+> Statut : **implémenté** (toutes les phases). Le code suit cette architecture ; écarts notés ci-dessous.
+>
+> Écarts : CMake au lieu de Projucer ; limiteur crête sans lookahead (zéro latence) ; les générations sont **rendues hors ligne** par le même moteur que le temps réel (pas d'enregistrement de la sortie live) ; navigateur de presets sous forme de menus.
 
 ---
 
@@ -23,7 +25,7 @@
    Les croisements A×B créent de l'audio : ils prennent une place dans le réservoir et sont recyclés pareil.
 6. **Fichiers glissés** : lus et copiés dans le réservoir (60 s max par source, tronqués au-delà) ; le fichier d'origine n'est jamais modifié.
 7. **Disque : rien n'est écrit sans action de ta part.** Seuls « Exporter » et « Batch » écrivent des WAV, dans le dossier que tu choisis.
-   Le glisser-déposer vers Ableton utilise un fichier temporaire unique, effacé ensuite ; le dossier temporaire est vidé à chaque ouverture du plugin.
+   Le glisser-déposer vers Ableton écrit le fichier dans `Exports/Glisses` (Ableton référence ce fichier : il ne doit pas être effacé). C'est donc un export voulu, déclenché par ton geste.
 8. **Projet Ableton** : on sauvegarde les réglages, les chemins des fichiers glissés et **uniquement les fragments likés** (compressés, plafond 16 Mo).
    La capture et les générations ne sont pas sauvegardées : le projet reste léger.
 9. **Jauge mémoire** visible dans l'Estomac (ex. « 41 / 96 Mo »).

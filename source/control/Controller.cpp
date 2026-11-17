@@ -1,3 +1,5 @@
+#include <map>
+#include <algorithm>
 #include "Controller.h"
 #include "PluginProcessor.h"
 

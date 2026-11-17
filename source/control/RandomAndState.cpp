@@ -249,7 +249,7 @@ juce::ValueTree Controller::saveExtraState() const
         juce::FlacAudioFormat flac;
         for (const auto& f : library->frags)
         {
-            if (! f.liked || f.slot >= 0) // les fragments de sources-fichiers sont recréés depuis le fichier
+            if (! f.liked)
                 continue;
             const auto& buf = library->buffers[(size_t) f.buffer];
             juce::AudioBuffer<float> tmp (2, f.length);

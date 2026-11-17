@@ -6,6 +6,12 @@ OuroborosEditor::OuroborosEditor (OuroborosProcessor& p)
 {
     addAndMakeVisible (view);
     view.onSizePreset = [this] (int percent) { applySizePreset (percent); };
+    tooltips = std::make_unique<juce::TooltipWindow> (this, 600);
+    view.onHelpToggle = [this] (bool on)
+    {
+        if (on) tooltips = std::make_unique<juce::TooltipWindow> (this, 600);
+        else tooltips.reset();
+    };
 
     constexpr double ratio = (double) MainView::kWidth / (double) MainView::kHeight;
 

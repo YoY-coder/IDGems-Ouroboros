@@ -10,7 +10,7 @@
     Chaque SampleData s'y enregistre à sa création et s'en retire à sa destruction :
     on sait donc à tout moment combien d'octets d'audio sont vivants.
 */
-class MemoryBudget
+class MemoryBudget : public std::enable_shared_from_this<MemoryBudget>
 {
 public:
     std::atomic<int64_t> used { 0 };
@@ -71,7 +71,7 @@ public:
 private:
     SampleData (MemoryBudget&, int frames, double sr, const juce::String& n);
 
-    MemoryBudget& budget;
+    std::shared_ptr<MemoryBudget> budget; // le budget vit tant qu'un bloc audio existe
     std::vector<int16_t> data;
     int numFrames;
     double sampleRate;
@@ -105,7 +105,7 @@ public:
     }
 
 private:
-    MemoryBudget& budget;
+    std::shared_ptr<MemoryBudget> budget;
     std::vector<int16_t> data;
     int capacity;
     double sampleRate;
