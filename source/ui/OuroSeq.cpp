@@ -317,7 +317,7 @@ SequencerPanel::SequencerPanel (UiContext& c)
     addCombo (P::crossMode).setTooltip ("Type de croisement des fragments A et B");
 
     const std::pair<int, const char*> seqKnobs[] = {
-        { P::seqLength, "Pas" }, { P::swing, "Swing" }, { P::ruleRandom, "Aleat." }, { P::ruleSimilar, "Ressemb." },
+        { P::seqLength, "Nb pas" }, { P::swing, "Swing" }, { P::ruleRandom, "Aleat." }, { P::ruleSimilar, "Ressemb." },
         { P::ruleContrast, "Contraste" }, { P::seqPitch, "Pitch" }, { P::seqLengthScale, "Long.frag" },
         { P::seqReverse, "Reverse" }, { P::engineLevel, "Niveau" }, { P::velocitySens, "Veloc." } };
     for (auto& [p, l] : seqKnobs)
