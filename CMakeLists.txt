@@ -38,10 +38,8 @@ juce_add_plugin(IDGemsOuroboros
     NEEDS_WEB_BROWSER FALSE
     NEEDS_CURL FALSE)
 
-target_sources(IDGemsOuroboros PRIVATE
-    source/PluginProcessor.cpp
-    source/PluginEditor.cpp
-    source/ui/MainView.cpp)
+file(GLOB_RECURSE OURO_SOURCES CONFIGURE_DEPENDS source/*.cpp source/*.h)
+target_sources(IDGemsOuroboros PRIVATE ${OURO_SOURCES})
 
 target_include_directories(IDGemsOuroboros PRIVATE source)
 
@@ -49,7 +47,9 @@ target_compile_definitions(IDGemsOuroboros PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_DISPLAY_SPLASH_SCREEN=0)
+    JUCE_DISPLAY_SPLASH_SCREEN=0
+    JUCE_USE_MP3AUDIOFORMAT=1
+    JUCE_USE_FLAC=1)
 
 target_link_libraries(IDGemsOuroboros
     PRIVATE

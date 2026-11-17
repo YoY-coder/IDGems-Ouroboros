@@ -1,25 +1,46 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "control/Controller.h"
 
 OuroborosProcessor::OuroborosProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Entree",    juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Sortie",    juce::AudioChannelSet::stereo(), true)
                           .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
-      apvts (*this, nullptr, "OUROBOROS", createLayout())
+      apvts (*this, &undoManager, "OUROBOROS", P::createLayout())
 {
+    for (int i = 0; i < P::count; ++i)
+    {
+        params[(size_t) i] = apvts.getParameter (P::info (i).id);
+        raw[(size_t) i] = apvts.getRawParameterValue (P::info (i).id);
+        modulatedDisplay[(size_t) i].store (P::info (i).def);
+    }
+    for (auto& c : ccMap)
+        c.store (-1);
+
+    base = P::defaults();
+    engine.setTrash (&trash);
+    controller = std::make_unique<Controller> (*this);
 }
 
-juce::AudioProcessorValueTreeState::ParameterLayout OuroborosProcessor::createLayout()
+OuroborosProcessor::~OuroborosProcessor()
 {
-    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+    controller.reset();
+}
 
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::outGain, 1 }, "Gain de sortie",
-        juce::NormalisableRange<float> (-60.0f, 12.0f, 0.01f, 2.0f), 0.0f,
-        juce::AudioParameterFloatAttributes().withLabel ("dB")));
+std::shared_ptr<CaptureRing> OuroborosProcessor::getRing() const
+{
+    const juce::SpinLock::ScopedLockType sl (ringLock);
+    return ringShared;
+}
 
-    return layout;
+void OuroborosProcessor::setRing (std::shared_ptr<CaptureRing> r)
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (ringLock);
+        ringShared = r;
+    }
+    ringQueue.push (std::move (r));
 }
 
 bool OuroborosProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -32,7 +53,6 @@ bool OuroborosProcessor::isBusesLayoutSupported (const BusesLayout& layouts) con
     if (mainIn != mainOut)
         return false;
 
-    // Sidechain : désactivé, mono ou stéréo.
     if (layouts.inputBuses.size() > 1)
     {
         const auto sc = layouts.getChannelSet (true, 1);
@@ -42,22 +62,38 @@ bool OuroborosProcessor::isBusesLayoutSupported (const BusesLayout& layouts) con
     return true;
 }
 
-void OuroborosProcessor::prepareToPlay (double sampleRate, int)
+void OuroborosProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    outGainSmoothed.reset (sampleRate, 0.03);
-    outGainSmoothed.setCurrentAndTargetValue (
-        juce::Decibels::decibelsToGain (apvts.getRawParameterValue (ParamIDs::outGain)->load(), -60.0f));
+    currentSampleRate = sampleRate;
+    telemetry.sampleRate.store (sampleRate);
+    const int block = juce::jmax (512, samplesPerBlock);
+    engine.prepare (sampleRate, block);
+    output.prepare (sampleRate, block);
+    wet.setSize (2, block);
+    dry.setSize (2, block);
+
+    // Le buffer de capture dépend du taux d'échantillonnage : on le (re)crée ici,
+    // l'audio ne tourne pas pendant prepareToPlay.
+    const int frames = (int) (sampleRate * juce::jlimit (5.0f, 120.0f, raw[P::captureSeconds]->load()));
+    if (ringAudio == nullptr || ringAudio->getSampleRate() != sampleRate || ringAudio->getCapacity() != frames)
+    {
+        auto r = std::make_shared<CaptureRing> (budget, frames, sampleRate);
+        {
+            const juce::SpinLock::ScopedLockType sl (ringLock);
+            ringShared = r;
+        }
+        ringAudio = r;
+    }
 }
 
-static float peakOf (const juce::AudioBuffer<float>& b, int firstChan, int numChans, int numSamples)
+static float peakOf (const juce::AudioBuffer<float>& b, int numSamples)
 {
     float p = 0.0f;
-    for (int c = 0; c < numChans; ++c)
-        p = juce::jmax (p, b.getMagnitude (firstChan + c, 0, numSamples));
+    for (int c = 0; c < b.getNumChannels(); ++c)
+        p = juce::jmax (p, b.getMagnitude (c, 0, numSamples));
     return p;
 }
 
-/** Retombée douce des mètres : on garde le max entre la nouvelle crête et l'ancienne qui décroît. */
 static void publishPeak (std::atomic<float>& target, float peak)
 {
     const float prev = target.load (std::memory_order_relaxed);
@@ -68,34 +104,93 @@ void OuroborosProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 {
     juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
+    if (numSamples > wet.getNumSamples())
+    {
+        // L'hôte envoie un bloc plus grand qu'annoncé (rare) : on agrandit.
+        wet.setSize (2, numSamples, false, false, true);
+        dry.setSize (2, numSamples, false, false, true);
+    }
 
-    // --- Tempo de l'hôte -------------------------------------------------------------------
+    // --- Nouvelles données publiées par l'UI --------------------------------------------
+    libraryBox.fetch (engine.library, trash);
+    patternBox.fetch (engine.pattern, trash);
+    modBox.fetch (engine.mods, trash);
+    {
+        std::shared_ptr<CaptureRing> r;
+        while (ringQueue.pop (r))
+        {
+            trash.dispose (std::move (ringAudio));
+            ringAudio = std::move (r);
+        }
+    }
+
+    // --- Paramètres ---------------------------------------------------------------------
+    for (int i = 0; i < P::count; ++i)
+        base[(size_t) i] = raw[(size_t) i]->load (std::memory_order_relaxed);
+
+    // --- Commandes UI ---------------------------------------------------------------------
+    AudioCommand cmd;
+    while (commands.pop (cmd))
+    {
+        if (cmd.type == AudioCommand::Audition)       engine.audition (cmd.value);
+        else if (cmd.type == AudioCommand::Panic)     { engine.panic(); output.reset(); }
+        else if (cmd.type == AudioCommand::ResetSequencer) engine.reset();
+    }
+
+    // --- Transport ----------------------------------------------------------------------
+    Transport transport;
     if (auto* ph = getPlayHead())
+    {
         if (auto pos = ph->getPosition())
+        {
             if (auto bpm = pos->getBpm())
-                telemetry.bpm.store (*bpm, std::memory_order_relaxed);
+                transport.bpm = *bpm;
+            if (auto ppq = pos->getPpqPosition())
+                transport.ppq = *ppq;
+            transport.playing = pos->getIsPlaying();
+            if (auto sig = pos->getTimeSignature())
+                telemetry.beatsPerBar.store (juce::jmax (1, sig->numerator * 4 / juce::jmax (1, sig->denominator)));
+        }
+    }
+    telemetry.bpm.store (transport.bpm, std::memory_order_relaxed);
 
-    // --- Bus ------------------------------------------------------------------------------
-    auto mainIn  = getBusBuffer (buffer, true, 0);
+    // --- Bus ----------------------------------------------------------------------------------
+    auto mainIn = getBusBuffer (buffer, true, 0);
     auto mainOut = getBusBuffer (buffer, false, 0);
-
     const bool hasSidechain = getBusCount (true) > 1 && getBus (true, 1)->isEnabled()
                               && getBus (true, 1)->getNumberOfChannels() > 0;
     telemetry.sidechainActive.store (hasSidechain, std::memory_order_relaxed);
 
-    publishPeak (telemetry.inLevel, peakOf (mainIn, 0, mainIn.getNumChannels(), numSamples));
+    const int inCh = mainIn.getNumChannels();
+    for (int c = 0; c < 2; ++c)
+    {
+        if (inCh > 0)
+            dry.copyFrom (c, 0, mainIn, juce::jmin (c, inCh - 1), 0, numSamples);
+        else
+            dry.clear (c, 0, numSamples);
+    }
+    publishPeak (telemetry.inLevel, peakOf (mainIn, numSamples));
 
+    // --- Capture (entrée ou sidechain) dans le buffer circulaire ---------------------------
+    const float* capL = dry.getReadPointer (0);
+    const float* capR = dry.getReadPointer (1);
     if (hasSidechain)
     {
         auto sc = getBusBuffer (buffer, true, 1);
-        publishPeak (telemetry.scLevel, peakOf (sc, 0, sc.getNumChannels(), numSamples));
+        publishPeak (telemetry.scLevel, peakOf (sc, numSamples));
+        if (base[P::captureSource] > 0.5f && sc.getNumChannels() > 0)
+        {
+            capL = sc.getReadPointer (0);
+            capR = sc.getReadPointer (juce::jmin (1, sc.getNumChannels() - 1));
+        }
     }
     else
-    {
         publishPeak (telemetry.scLevel, 0.0f);
-    }
 
-    // --- MIDI -----------------------------------------------------------------------------
+    if (ringAudio != nullptr)
+        ringAudio->write (capL, capR, numSamples);
+
+    // --- MIDI : learn + CC + notes ---------------------------------------------------------------
     for (const auto meta : midi)
     {
         const auto msg = meta.getMessage();
@@ -105,34 +200,62 @@ void OuroborosProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
             telemetry.lastVelocity.store (msg.getFloatVelocity(), std::memory_order_relaxed);
             telemetry.noteCounter.fetch_add (1, std::memory_order_relaxed);
         }
+        else if (msg.isController())
+        {
+            const int cc = msg.getControllerNumber();
+            const int learn = midiLearnTarget.load();
+            if (learn >= 0)
+            {
+                for (auto& c : ccMap)
+                    if (c.load() == learn) c.store (-1);
+                ccMap[(size_t) cc].store (learn);
+                midiLearnTarget.store (-1);
+            }
+            const int target = ccMap[(size_t) cc].load();
+            if (target >= 0 && target < P::count)
+                params[(size_t) target]->setValueNotifyingHost (msg.getControllerValue() / 127.0f);
+        }
     }
-    midi.clear(); // on ne renvoie pas de MIDI
 
-    // --- Phase 1 : passage direct de l'audio + gain de sortie ------------------------------
-    // (les canaux de sortie au-delà du bus principal sont mis à zéro)
+    // --- Moteur (wet) -----------------------------------------------------------------------
+    engine.process (wet.getWritePointer (0), wet.getWritePointer (1), numSamples, base, transport, &midi);
+    midi.clear();
+
+    const auto& v = engine.getModulatedValues();
+    publishPeak (telemetry.wetLevel, juce::jmax (wet.getMagnitude (0, 0, numSamples), wet.getMagnitude (1, 0, numSamples)));
+    telemetry.playing.store (transport.playing || base[P::seqRun] > 0.5f, std::memory_order_relaxed);
+    telemetry.ppq.store (transport.ppq, std::memory_order_relaxed);
+
+    // --- Mélange dry/wet puis chaîne de sortie --------------------------------------------------
+    const float mix = juce::jlimit (0.0f, 1.0f, v[P::dryWet]);
+    for (int c = 0; c < 2; ++c)
+    {
+        auto* w = wet.getWritePointer (c);
+        const auto* d = dry.getReadPointer (c);
+        for (int i = 0; i < numSamples; ++i)
+            w[i] = d[i] * (1.0f - mix) + w[i] * mix;
+    }
+    output.process (wet.getWritePointer (0), wet.getWritePointer (1), numSamples, v);
+
     for (int c = mainOut.getNumChannels(); c < buffer.getNumChannels(); ++c)
         buffer.clear (c, 0, numSamples);
-
-    outGainSmoothed.setTargetValue (
-        juce::Decibels::decibelsToGain (apvts.getRawParameterValue (ParamIDs::outGain)->load(), -60.0f));
-
-    if (outGainSmoothed.isSmoothing())
+    if (mainOut.getNumChannels() == 1)
     {
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const float g = outGainSmoothed.getNextValue();
-            for (int c = 0; c < mainOut.getNumChannels(); ++c)
-                mainOut.getWritePointer (c)[i] *= g;
-        }
+        mainOut.copyFrom (0, 0, wet, 0, 0, numSamples);
+        mainOut.addFrom (0, 0, wet, 1, 0, numSamples);
+        mainOut.applyGain (0.5f);
     }
     else
     {
-        mainOut.applyGain (outGainSmoothed.getTargetValue());
+        for (int c = 0; c < juce::jmin (2, mainOut.getNumChannels()); ++c)
+            mainOut.copyFrom (c, 0, wet, c, 0, numSamples);
     }
 
-    publishPeak (telemetry.outLevelL, mainOut.getNumChannels() > 0 ? mainOut.getMagnitude (0, 0, numSamples) : 0.0f);
-    publishPeak (telemetry.outLevelR, mainOut.getNumChannels() > 1 ? mainOut.getMagnitude (1, 0, numSamples)
-                                                                   : telemetry.outLevelL.load());
+    publishPeak (telemetry.outLevelL, wet.getMagnitude (0, 0, numSamples));
+    publishPeak (telemetry.outLevelR, wet.getMagnitude (1, 0, numSamples));
+
+    for (int i = 0; i < P::count; ++i)
+        modulatedDisplay[(size_t) i].store (v[(size_t) i], std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* OuroborosProcessor::createEditor()
@@ -142,25 +265,63 @@ juce::AudioProcessorEditor* OuroborosProcessor::createEditor()
 
 void OuroborosProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    auto state = apvts.copyState();
-    state.setProperty ("editorWidth", editorWidth.load(), nullptr);
-    state.setProperty ("version", JucePlugin_VersionString, nullptr);
+    juce::ValueTree root ("OUROBOROS_STATE");
+    root.setProperty ("version", JucePlugin_VersionString, nullptr);
+    root.setProperty ("editorWidth", editorWidth.load(), nullptr);
+    root.appendChild (apvts.copyState(), nullptr);
 
-    if (auto xml = state.createXml())
+    juce::ValueTree midiMap ("MIDIMAP");
+    for (int cc = 0; cc < 128; ++cc)
+        if (ccMap[(size_t) cc].load() >= 0)
+            midiMap.setProperty ("cc" + juce::String (cc), P::info (ccMap[(size_t) cc].load()).id, nullptr);
+    root.appendChild (midiMap, nullptr);
+
+    // Données de l'UI (sources, pattern, modulations, fragments likés…)
+    auto extra = controller->getExtraStateForSaving();
+    if (extra.isValid())
+        root.appendChild (extra, nullptr);
+
+    if (auto xml = root.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
 void OuroborosProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary (data, sizeInBytes))
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml == nullptr)
+        return;
+
+    auto root = juce::ValueTree::fromXml (*xml);
+    if (root.hasType (apvts.state.getType()))
     {
-        if (xml->hasTagName (apvts.state.getType()))
-        {
-            auto tree = juce::ValueTree::fromXml (*xml);
-            editorWidth.store ((int) tree.getProperty ("editorWidth", 0));
-            apvts.replaceState (tree);
-        }
+        // Ancien format (phase 1)
+        editorWidth.store ((int) root.getProperty ("editorWidth", 0));
+        apvts.replaceState (root);
+        return;
     }
+    if (! root.hasType ("OUROBOROS_STATE"))
+        return;
+
+    editorWidth.store ((int) root.getProperty ("editorWidth", 0));
+    auto state = root.getChildWithName (apvts.state.getType());
+    if (state.isValid())
+        apvts.replaceState (state);
+
+    auto midiMap = root.getChildWithName ("MIDIMAP");
+    for (auto& c : ccMap)
+        c.store (-1);
+    for (int i = 0; i < midiMap.getNumProperties(); ++i)
+    {
+        const auto name = midiMap.getPropertyName (i).toString();
+        const int cc = name.substring (2).getIntValue();
+        const int p = P::indexOf (midiMap.getProperty (name).toString());
+        if (cc >= 0 && cc < 128 && p >= 0)
+            ccMap[(size_t) cc].store (p);
+    }
+
+    auto extra = root.getChildWithName ("EXTRA").createCopy();
+    if (extra.isValid())
+        controller->restoreExtraStateAsync (extra);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
