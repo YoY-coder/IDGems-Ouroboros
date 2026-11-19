@@ -4,6 +4,9 @@
 OuroborosEditor::OuroborosEditor (OuroborosProcessor& p)
     : AudioProcessorEditor (p), proc (p), view (p)
 {
+    // Lire la taille mémorisée AVANT setResizable / setResizeLimits, qui déclenchent resized()
+    const int remembered = proc.editorWidth.load();
+
     addAndMakeVisible (view);
     view.onSizePreset = [this] (int percent) { applySizePreset (percent); };
     tooltips = std::make_unique<juce::TooltipWindow> (this, 600);
@@ -21,10 +24,11 @@ OuroborosEditor::OuroborosEditor (OuroborosProcessor& p)
     if (auto* c = getConstrainer())
         c->setFixedAspectRatio (ratio);
 
-    const int savedWidth = proc.editorWidth.load();
-    const int w = savedWidth > 0 ? juce::jlimit (MainView::kWidth / 2, MainView::kWidth * 2, savedWidth)
+    const int w = remembered > 0 ? juce::jlimit (MainView::kWidth / 2, MainView::kWidth * 2, remembered)
                                  : MainView::kWidth;
     setSize (w, juce::roundToInt (w / ratio));
+    ready = true;
+    proc.editorWidth.store (getWidth());
 }
 
 void OuroborosEditor::applySizePreset (int percent)
@@ -42,5 +46,6 @@ void OuroborosEditor::resized()
     const float scale = (float) getWidth() / (float) MainView::kWidth;
     view.setBounds (0, 0, MainView::kWidth, MainView::kHeight);
     view.setTransform (juce::AffineTransform::scale (scale));
-    proc.editorWidth.store (getWidth());
+    if (ready) // pas pendant la mise en place : on écraserait la taille mémorisée
+        proc.editorWidth.store (getWidth());
 }

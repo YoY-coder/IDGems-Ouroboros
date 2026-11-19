@@ -23,6 +23,7 @@ private:
     OuroborosProcessor& proc;
     MainView view;
     std::unique_ptr<juce::TooltipWindow> tooltips;
+    bool ready = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (OuroborosEditor)
 };
